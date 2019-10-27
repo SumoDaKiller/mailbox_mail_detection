@@ -3,8 +3,10 @@ import RPi.GPIO as GPIO
 import time
 import math
 import systemd.daemon
+import logging
 
 from picamera import PiCamera
+from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from subprocess import Popen, PIPE
@@ -50,6 +52,7 @@ def distance():
 
 
 def takepicture():
+    logging.info('Taking a picture')
     camera = PiCamera()
     camera.rotation = 180
     camera.start_preview()
@@ -58,50 +61,66 @@ def takepicture():
     camera.stop_preview()
 
 
-def sendemail(distdiff):
+def sendemail(distdiff, incpicture):
+    logging.info('Sending email')
     fromemail = 'ravsliberen@ravsliberen.dk'
-    toemail = 'sumo.da.killer@gmail.com'
+    toemail = 'ravsliberen@ravsliberen.dk'
     msg = MIMEMultipart()
     msg['Subject'] = 'Post i postkassen :)'
     msg['From'] = fromemail
     msg['To'] = toemail
-    msg.preamble = 'Afstand aendret med ' + distdiff + ' cm'
-    fp = open('/tmp/mail.jpg', 'rb')
-    img = MIMEImage(fp.read())
-    fp.close()
-    msg.attach(img)
+    body = 'Afstand aendret med ' + distdiff + ' cm'
+    # convert the body to a MIME compatible string
+    body = MIMEText(body)
+    msg.attach(body)
+
+    if incpicture:
+        takepicture()
+        logging.info('Attaching picture to email')
+        fp = open('/tmp/mail.jpg', 'rb')
+        img = MIMEImage(fp.read())
+        fp.close()
+        msg.attach(img)
+
     p = Popen(["/usr/sbin/sendmail", "-t", "-oi"], stdin=PIPE)
     p.communicate(msg.as_string())
 
 
 if __name__ == '__main__':
     try:
-        # Give the sensor a couple of seconds to settle
-        time.sleep(2)
+        # Setup logging
+        logging.basicConfig(format='%(asctime)s %(message)s', filename='/var/log/mailbox_mail_detection.log', level=logging.DEBUG)
         # Tell systemd that our service is ready
         systemd.daemon.notify('READY=1')
+        # Give the sensor a couple of seconds to settle
+        logging.info('Wating for sensor to settle...')
+        time.sleep(2)
+        logging.info('Sensor settled')
         old_dist = 0
         triggered_dist = 0
+        triggered_dist_log = False
         while True:
             dist = distance()
             if old_dist == 0:
                 old_dist = dist
             if triggered_dist > 0 and triggered_dist != dist:
                 triggered_dist = 0
+                triggered_dist_log = False
             elif triggered_dist == dist:
+                if not triggered_dist_log:
+                    logging.info('Triggered dist equals dist, assuming something is in front of the sensor! ' + str(triggered_dist) + ' - ' + str(dist))
+                    triggered_dist_log = True
                 # Mail is probably in front of sensor, so don't send mails
                 continue
-            # It seem that the distance sometimes changes without any mail, but so far only by 1
-            if dist < old_dist and (old_dist - dist) > 1:
-                print("Distance changed from " + str(old_dist) + " to " + str(dist) + " cm")
-                takepicture()
-                sendemail(str(old_dist - dist))
+            # It seem that the distance sometimes changes without any mail, but so far only by 2
+            if dist < old_dist and (old_dist - dist) > 2:
+                logging.info("Distance changed from " + str(old_dist) + " to " + str(dist) + " cm")
+                sendemail(str(old_dist - dist), False)
                 if triggered_dist == 0:
                     triggered_dist = dist
 
             time.sleep(0.1)
-
-        # Reset by pressing CTRL + C
-    except KeyboardInterrupt:
-        print("Measurement stopped by User")
+    except:
+        logging.error('An error occurred')
+    finally:
         GPIO.cleanup()
